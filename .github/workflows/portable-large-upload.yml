@@ -1,0 +1,99 @@
+name: Portable Large Upload
+run-name: Portable large upload ${{ inputs.upload_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      upload_id:
+        required: true
+        type: string
+      source_branch:
+        required: true
+        type: string
+      target_branch:
+        required: true
+        type: string
+      target_path:
+        required: true
+        type: string
+      chunk_count:
+        required: true
+        type: string
+      file_size:
+        required: true
+        type: string
+      sha256:
+        required: false
+        type: string
+      commit_message:
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  assemble:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout target branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.target_branch }}
+          fetch-depth: 0
+
+      - name: Assemble large file
+        env:
+          UPLOAD_ID: ${{ inputs.upload_id }}
+          SOURCE_BRANCH: ${{ inputs.source_branch }}
+          TARGET_PATH: ${{ inputs.target_path }}
+          CHUNK_COUNT: ${{ inputs.chunk_count }}
+          FILE_SIZE: ${{ inputs.file_size }}
+          FILE_SHA256: ${{ inputs.sha256 }}
+        run: |
+          set -euo pipefail
+          git fetch origin "${SOURCE_BRANCH}:${SOURCE_BRANCH}"
+          upload_dir=".portable-large-uploads/${UPLOAD_ID}"
+          mkdir -p "$(dirname -- "$TARGET_PATH")"
+          : > "$TARGET_PATH"
+          i=0
+          while [ "$i" -lt "$CHUNK_COUNT" ]; do
+            chunk=$(printf "chunk-%05d.part" "$i")
+            git show "${SOURCE_BRANCH}:${upload_dir}/${chunk}" >> "$TARGET_PATH"
+            i=$((i + 1))
+          done
+          actual_size=$(wc -c < "$TARGET_PATH" | tr -d " ")
+          if [ "$actual_size" != "$FILE_SIZE" ]; then
+            echo "Size mismatch: expected $FILE_SIZE, got $actual_size"
+            exit 1
+          fi
+          if [ -n "$FILE_SHA256" ]; then
+            actual_sha=$(sha256sum "$TARGET_PATH" | cut -d " " -f 1)
+            if [ "$actual_sha" != "$FILE_SHA256" ]; then
+              echo "SHA-256 mismatch"
+              exit 1
+            fi
+          fi
+
+      - name: Commit final file
+        env:
+          TARGET_BRANCH: ${{ inputs.target_branch }}
+          TARGET_PATH: ${{ inputs.target_path }}
+          COMMIT_MESSAGE: ${{ inputs.commit_message }}
+        run: |
+          set -euo pipefail
+          git config user.name "Portable Workspace"
+          git config user.email "portable-workspace@users.noreply.github.com"
+          git add -- "$TARGET_PATH"
+          if git diff --cached --quiet; then
+            echo "No file changes to commit."
+          else
+            git commit -m "$COMMIT_MESSAGE"
+            git push origin "HEAD:${TARGET_BRANCH}"
+          fi
+
+      - name: Delete temporary chunk branch
+        if: always()
+        env:
+          SOURCE_BRANCH: ${{ inputs.source_branch }}
+        run: git push origin --delete "$SOURCE_BRANCH" || true
